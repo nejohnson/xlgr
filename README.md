@@ -19,7 +19,7 @@ some_command | ./xlgr -                # standard input
 ```
 
 Options: `-serial`, `-baud`, `-serialmode`, `-flow`, `-telnet`, `-file`,
-`-scrollback`, `-rules`, `-rule`, `-norules`, `-font`, `-display`,
+`-scrollback`, `-rules`, `-rule`, `-norules`, `-noansi`, `-font`, `-display`,
 `-geometry` (in pixels), `-fg`/`-foreground`, `-bg`/`-background` and
 `-hl`/`-highlight` (cursor line colour). Run `./xlgr -help` for a summary.
 
@@ -70,9 +70,23 @@ can tune it while a log is streaming. See `xlgr.rules.example`.
 
 ## Input handling
 
+## ANSI colours
+
+SGR escape sequences in the log are shown as colours and styles: the 8 and 16
+standard colours (`30-37`, `90-97`, `40-47`, `100-107`), 256-colour
+(`38;5;n`) and truecolour (`38;2;r;g;b`) foregrounds and backgrounds, bold,
+underline and reverse. A style carries onto following lines until reset. The
+16 standard colours use a palette that is readable on a light background, or
+the usual xterm colours when `-bg` is dark. Highlighting rules take priority
+over ANSI colours where both set the same property, and search matches
+override both. Other escape sequences (cursor movement and so on) are
+removed. Use `-noansi` to strip all escape sequences without colouring.
+
+## Input handling
+
 Lines end at LF, CRLF or a lone CR. A line is shown as soon as its first
 character arrives, so prompts without a newline are visible. Tabs expand to 8
-columns, ANSI escape sequences are removed, other control characters show as
+columns, other control characters show as
 `.`, and UTF-8 is converted to Latin-1 for the core X font (characters outside
 Latin-1 show as `?`). Lines over 4096 characters are split. Telnet option
 negotiation is handled; every option except ECHO and SGA is refused.

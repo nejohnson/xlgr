@@ -51,6 +51,7 @@ typedef struct {
     long scrollback;
     int baud;
     bool norules;
+    bool noansi;
 } Options;
 
 static Options opt;
@@ -61,6 +62,7 @@ static void usage(FILE *out)
         "Usage: xlgr [file | -] [-serial device] [-baud rate] [-serialmode 8N1]\n"
         "            [-flow none|rtscts|xonxoff] [-telnet host:port]\n"
         "            [-scrollback lines] [-rules file] [-rule 'regex rule'] [-norules]\n"
+        "            [-noansi]\n"
         "            [-font font] [-display display] [-geometry geometry]\n"
         "            [-fg color] [-bg color] [-hl color]\n"
         "View log messages from a file (followed as it grows), standard input, a\n"
@@ -128,6 +130,8 @@ static void parse_options(int argc, char **argv)
             opt.cli_rules[opt.ncli_rules++] = rule;
         } else if (!strcmp(arg, "-norules")) {
             opt.norules = true;
+        } else if (!strcmp(arg, "-noansi")) {
+            opt.noansi = true;
         } else if (!strcmp(arg, "-font")) {
             opt.font = option_value(argc, argv, &i);
         } else if (!strcmp(arg, "-display")) {
@@ -177,10 +181,39 @@ static long long monotonic_ms(void)
 /* Line buffer: a ring of lines addressed by absolute line number     */
 /* ------------------------------------------------------------------ */
 
+/* ANSI SGR style. Colours are -1 (default), 0xRRGGBB, or ANSI_INDEXED | n
+   for the 256-colour palette. */
+#define ANSI_INDEXED 0x1000000
+enum { A_BOLD = 1, A_UNDERLINE = 2, A_REVERSE = 4 };
+
+typedef struct {
+    int32_t fg, bg;
+    uint8_t attrs;
+} AnsiStyle;
+
+typedef struct {
+    uint32_t col;        /* first column the style applies to */
+    AnsiStyle style;
+} AnsiRun;
+
 typedef struct {
     char *s;             /* NUL-terminated, one Latin-1 byte per column */
     uint32_t len, cap;
+    AnsiRun *runs;       /* style changes, in column order; NULL if none */
+    uint32_t nruns, rcap;
 } Line;
+
+static const AnsiStyle ansi_default = { -1, -1, 0 };
+
+static struct {
+    bool skip_lf;
+    int esc;             /* 0 none, 1 after ESC, 2 inside CSI */
+    int utf_need;
+    unsigned utf_cp;
+    char csi[64];        /* CSI parameter bytes */
+    size_t csilen;
+    AnsiStyle cur;       /* style applied to characters from now on */
+} ing = { .cur = { -1, -1, 0 } };
 
 static Line *ring;
 static size_t ring_cap;
@@ -235,12 +268,15 @@ static void new_line(void)
     if (total - base == (int64_t)ring_cap) {
         Line *old = line_at(base);
         free(old->s);
+        free(old->runs);
         *old = (Line){ 0 };
         ++base;
     }
     Line *l = line_at(total);
     l->cap = 64;
     l->len = 0;
+    l->runs = NULL;
+    l->nruns = l->rcap = 0;
     l->s = malloc(l->cap + 1);
     if (!l->s) die_oom();
     l->s[0] = 0;
@@ -269,6 +305,17 @@ static void append_char(unsigned char c)
         new_line();
         l = line_at(total - 1);
     }
+    if (!opt.noansi) {
+        AnsiStyle eff = l->nruns ? l->runs[l->nruns - 1].style : ansi_default;
+        if (eff.fg != ing.cur.fg || eff.bg != ing.cur.bg || eff.attrs != ing.cur.attrs) {
+            if (l->nruns == l->rcap) {
+                l->rcap = l->rcap ? l->rcap * 2 : 4;
+                l->runs = realloc(l->runs, l->rcap * sizeof(*l->runs));
+                if (!l->runs) die_oom();
+            }
+            l->runs[l->nruns++] = (AnsiRun){ .col = l->len, .style = ing.cur };
+        }
+    }
     if (l->len == l->cap) {
         l->cap *= 2;
         l->s = realloc(l->s, l->cap + 1);
@@ -289,6 +336,7 @@ static void clear_buffer(void)
 {
     for (int64_t n = base; n < total; ++n) {
         free(line_at(n)->s);
+        free(line_at(n)->runs);
         *line_at(n) = (Line){ 0 };
     }
     base = total;
@@ -344,12 +392,53 @@ static void rebuild_filter(void)
 /* Ingest: bytes -> lines (UTF-8, tabs, ANSI escapes, CR/LF)          */
 /* ------------------------------------------------------------------ */
 
-static struct {
-    bool skip_lf;
-    int esc;             /* 0 none, 1 after ESC, 2 inside CSI */
-    int utf_need;
-    unsigned utf_cp;
-} ing;
+
+
+/* Apply the parameters of an SGR (CSI ... m) sequence to ing.cur. */
+static void apply_sgr(const char *params)
+{
+    int v[32], n = 0;
+    const char *p = params;
+    for (;;) {
+        int val = 0;
+        while (isdigit((unsigned char)*p)) {
+            if (val < 100000) val = val * 10 + (*p - '0');
+            ++p;
+        }
+        if (n < 32) v[n++] = val;
+        if (*p == ';' || *p == ':') ++p; else break;
+    }
+    AnsiStyle *st = &ing.cur;
+    for (int i = 0; i < n; ++i) {
+        int c = v[i];
+        if (c == 0) *st = ansi_default;
+        else if (c == 1) st->attrs |= A_BOLD;
+        else if (c == 4) st->attrs |= A_UNDERLINE;
+        else if (c == 7) st->attrs |= A_REVERSE;
+        else if (c == 22) st->attrs &= (uint8_t)~A_BOLD;
+        else if (c == 24) st->attrs &= (uint8_t)~A_UNDERLINE;
+        else if (c == 27) st->attrs &= (uint8_t)~A_REVERSE;
+        else if (c >= 30 && c <= 37) st->fg = ANSI_INDEXED | (c - 30);
+        else if (c >= 40 && c <= 47) st->bg = ANSI_INDEXED | (c - 40);
+        else if (c >= 90 && c <= 97) st->fg = ANSI_INDEXED | (c - 90 + 8);
+        else if (c >= 100 && c <= 107) st->bg = ANSI_INDEXED | (c - 100 + 8);
+        else if (c == 39) st->fg = -1;
+        else if (c == 49) st->bg = -1;
+        else if (c == 38 || c == 48) {
+            int32_t color = -2;
+            if (i + 2 < n && v[i + 1] == 5) {
+                color = ANSI_INDEXED | (v[i + 2] & 0xff);
+                i += 2;
+            } else if (i + 4 < n && v[i + 1] == 2) {
+                color = ((v[i + 2] & 0xff) << 16) | ((v[i + 3] & 0xff) << 8) | (v[i + 4] & 0xff);
+                i += 4;
+            } else {
+                i = n;
+            }
+            if (color != -2) { if (c == 38) st->fg = color; else st->bg = color; }
+        }
+    }
+}
 
 static void put_char(unsigned char c)
 {
@@ -371,10 +460,19 @@ static void ingest_byte(unsigned char c)
     }
     if (ing.esc == 1) {
         ing.esc = (c == '[') ? 2 : 0;
+        ing.csilen = 0;
         return;
     }
     if (ing.esc == 2) {
-        if (c >= 0x40 && c <= 0x7e) ing.esc = 0;
+        if (c >= 0x40 && c <= 0x7e) {
+            ing.esc = 0;
+            if (c == 'm' && !opt.noansi) {
+                ing.csi[ing.csilen] = 0;
+                apply_sgr(ing.csi);
+            }
+        } else if (ing.csilen + 1 < sizeof ing.csi) {
+            ing.csi[ing.csilen++] = (char)c;
+        }
         return;
     }
     if (c >= 0x80) {
@@ -455,11 +553,48 @@ static int pal_blend(int a, int b)
     return npal++;
 }
 
+/* ANSI colours: RGB for a 256-colour index. The first 16 are chosen to be
+   readable on a light background, or are the xterm colours on a dark one. */
+static bool dark_background;
+
+static uint32_t ansi_rgb(int n)
+{
+    static const uint32_t light[16] = {
+        0x000000, 0xcd0000, 0x008800, 0x907000, 0x0000ee, 0xcd00cd, 0x008888, 0x909090,
+        0x555555, 0xff0000, 0x00b000, 0xb08800, 0x5c5cff, 0xff00ff, 0x00b0b0, 0xb0b0b0 };
+    static const uint32_t dark[16] = {
+        0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x5c5cff, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
+        0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff };
+    if (n < 16) return dark_background ? dark[n] : light[n];
+    if (n < 232) {
+        static const int level[6] = { 0, 95, 135, 175, 215, 255 };
+        n -= 16;
+        return (uint32_t)(level[n / 36] << 16 | level[n / 6 % 6] << 8 | level[n % 6]);
+    }
+    int g = 8 + (n - 232) * 10;
+    return (uint32_t)(g << 16 | g << 8 | g);
+}
+
+/* Palette index for an ANSI colour value, or 0 for the default/unavailable. */
+static int ansi_pal(int32_t color)
+{
+    static struct { int32_t key; int pi; } cache[1024];
+    if (color < 0) return 0;
+    uint32_t rgb = color & ANSI_INDEXED ? ansi_rgb(color & 0xff) : (uint32_t)color;
+    size_t slot = (size_t)((color * 2654435761u) >> 22) & 1023;
+    if (cache[slot].pi && cache[slot].key == color) return cache[slot].pi;
+    char name[16];
+    snprintf(name, sizeof name, "#%06x", rgb);
+    int pi = pal_get(name);
+    if (pi < 0) return 0;
+    cache[slot].key = color;
+    cache[slot].pi = pi;
+    return pi;
+}
+
 /* ------------------------------------------------------------------ */
 /* Highlighting rules                                                 */
 /* ------------------------------------------------------------------ */
-
-enum { A_BOLD = 1, A_UNDERLINE = 2 };
 
 typedef struct {
     regex_t re;
@@ -1215,6 +1350,22 @@ static void draw_row(const Line *l, int y, bool cursor)
             off = (int)pm[0].rm_eo + (pm[0].rm_eo == pm[0].rm_so);
         }
     }
+    /* ANSI styling fills whatever the rules left unset. */
+    for (uint32_t ri = 0; ri < l->nruns; ++ri) {
+        const AnsiRun *run = &l->runs[ri];
+        int from = (int)run->col, to = ri + 1 < l->nruns ? (int)l->runs[ri + 1].col : len;
+        int f = ansi_pal(run->style.fg), b = ansi_pal(run->style.bg);
+        if (run->style.attrs & A_REVERSE) {
+            int nf = b ? b : ibg, nb = f ? f : ifg;
+            f = nf;
+            b = nb;
+        }
+        for (int i = from; i < to && i < len; ++i) {
+            if (!fgi[i]) fgi[i] = (uint16_t)f;
+            if (!bgi[i]) bgi[i] = (uint16_t)b;
+            at[i] |= run->style.attrs & (A_BOLD | A_UNDERLINE);
+        }
+    }
     if (search_on) {
         for (int off = 0; off <= len;) {
             regmatch_t pm[1] = { { off, len } };
@@ -1585,6 +1736,7 @@ int main(int argc, char **argv)
     ifg = pal_required(opt.foreground);
     ibg = pal_required(opt.background);
     ihl = pal_required(opt.highlight);
+    dark_background = (pal[ibg].c.red + pal[ibg].c.green + pal[ibg].c.blue) / 3 < 0x8000;
     isb_trough = pal_required("gray90");
     isb_thumb = pal_required("gray55");
     isearch_fg = pal_required("black");
