@@ -100,3 +100,15 @@ The window sets its own icon (`_NET_WM_ICON`). GNOME ignores that and looks up
 a desktop entry matching `WM_CLASS`; run `make install` to install the binary,
 `xlgr.desktop` and `xlgr.svg` under `~/.local` (or set `PREFIX`), then restart
 xlgr.
+
+## Tests
+
+`make test` builds and runs the tests; no X server is needed. `tests/test_xlgr.c`
+includes `xlgr.c` and unit-tests the line ingest (line endings, UTF-8, tabs,
+ANSI styles, telnet negotiation), the scrollback ring, filter, search, view
+and cursor logic, rule parsing and buffer writing. `tests/cli.sh` checks
+command-line handling and error messages. To run them under the sanitizers:
+
+```sh
+make test CFLAGS="-g -O1 -fsanitize=address,undefined" LDFLAGS="-fsanitize=address,undefined"
+```

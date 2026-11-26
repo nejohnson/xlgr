@@ -398,6 +398,7 @@ static void rebuild_filter(void)
 static void apply_sgr(const char *params)
 {
     int v[32], n = 0;
+    bool colon[32] = { false };      /* separator after v[k] was ':' */
     const char *p = params;
     for (;;) {
         int val = 0;
@@ -405,7 +406,7 @@ static void apply_sgr(const char *params)
             if (val < 100000) val = val * 10 + (*p - '0');
             ++p;
         }
-        if (n < 32) v[n++] = val;
+        if (n < 32) { colon[n] = *p == ':'; v[n++] = val; }
         if (*p == ';' || *p == ':') ++p; else break;
     }
     AnsiStyle *st = &ing.cur;
@@ -430,8 +431,12 @@ static void apply_sgr(const char *params)
                 color = ANSI_INDEXED | (v[i + 2] & 0xff);
                 i += 2;
             } else if (i + 4 < n && v[i + 1] == 2) {
-                color = ((v[i + 2] & 0xff) << 16) | ((v[i + 3] & 0xff) << 8) | (v[i + 4] & 0xff);
-                i += 4;
+                /* 38:2:r:g:b, or 38:2:colourspace:r:g:b (colon form only). */
+                int chain = 0;
+                while (i + chain < n && colon[i + chain]) ++chain;
+                int k = (chain >= 5 && i + 5 < n) ? 3 : 2;
+                color = ((v[i + k] & 0xff) << 16) | ((v[i + k + 1] & 0xff) << 8) | (v[i + k + 2] & 0xff);
+                i += k + 2;
             } else {
                 i = n;
             }

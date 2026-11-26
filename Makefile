@@ -10,8 +10,16 @@ all: xlgr
 xlgr: xlgr.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c11 -Wall -Wextra -Wpedantic $(LDFLAGS) -o $@ $< $(LDLIBS)
 
+# Unit tests (no X server needed) and command-line tests.
+tests/test_xlgr: tests/test_xlgr.c xlgr.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c11 -Wall -Wextra -Wpedantic $(LDFLAGS) -o $@ $< $(LDLIBS)
+
+test: xlgr tests/test_xlgr
+	./tests/test_xlgr
+	sh tests/cli.sh ./xlgr
+
 clean:
-	rm -f xlgr
+	rm -f xlgr tests/test_xlgr
 
 # Install the binary, a desktop entry and an icon. GNOME shows the icon from
 # the desktop entry, matched by WM_CLASS, and ignores the window's own icon.
@@ -24,4 +32,4 @@ install: xlgr
 	-gtk-update-icon-cache -q -t $(DESTDIR)$(PREFIX)/share/icons/hicolor
 	-update-desktop-database -q $(DESTDIR)$(PREFIX)/share/applications
 
-.PHONY: all clean install
+.PHONY: all clean install test
