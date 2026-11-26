@@ -1,0 +1,38 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: make test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gcc
+            cc: gcc
+            cflags: -O2
+            ldflags: ""
+          - name: clang
+            cc: clang
+            cflags: -O2
+            ldflags: ""
+          - name: gcc + sanitizers
+            cc: gcc
+            cflags: -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined
+            ldflags: -fsanitize=address,undefined
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Xlib development files
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libx11-dev clang
+      - name: Build and test
+        env:
+          CC: ${{ matrix.cc }}
+          ASAN_OPTIONS: detect_leaks=0
+        run: make test CFLAGS="${{ matrix.cflags }}" LDFLAGS="${{ matrix.ldflags }}"
