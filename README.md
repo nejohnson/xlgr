@@ -71,7 +71,7 @@ of those, a few built-in rules colour errors, warnings and hex numbers; use
 can tune it while a log is streaming. See `xlgr.rules.example`.
 
 ```
-/regex/[i]  fg=COLOR bg=COLOR bold underline dim group=N line   # comment
+/regex/[i]  fg=COLOR bg=COLOR bold underline strike dim group=N line   # comment
 ```
 
 - The regex is POSIX extended (use `[0-9]`, not `\d`; GNU `\<` `\>` `\b` work).
@@ -79,9 +79,32 @@ can tune it while a log is streaming. See `xlgr.rules.example`.
 - `fg`/`bg` take X colour names or `#rrggbb`.
 - `group=N` colours only parenthesised group N instead of the whole match.
 - `line` colours the whole line if the regex matches anywhere.
-- `dim` fades the text colour towards the background.
+- `strike` draws a line through the text; `dim` fades the text colour towards
+  the background.
 - Each property (fg, bg, styles) is taken from the first rule that sets it, so
   put specific rules first.
+
+## Input handling
+
+## ANSI colours
+
+SGR escape sequences in the log are shown as colours and styles: the 8 and 16
+standard colours (`30-37`, `90-97`, `40-47`, `100-107`), 256-colour
+(`38;5;n`) and truecolour (`38;2;r;g;b`) foregrounds and backgrounds, bold,
+dim, underline, strikethrough and reverse. A style carries onto following
+lines until reset. The 16 standard colours use a palette that is readable on a
+light background, or the usual xterm colours when `-bg` is dark. Highlighting
+rules take priority over ANSI colours where both set the same property, and
+search matches override both.
+
+Everything else is removed without trace: cursor movement, erase and
+scrolling sequences, private modes, save/restore cursor, character-set
+selection (`ESC ( B`), and string sequences such as window titles and
+hyperlinks (OSC), DCS and APC, which end at BEL or `ESC \\`. The text of a
+hyperlink is kept. The bell is dropped. A control character, such as a
+newline, ends an unfinished escape sequence, so a stray ESC cannot swallow a
+line break. Italic, blink, conceal and underline colours are ignored. Use
+`-noansi` to strip all escape sequences without colouring.
 
 ## Input handling
 

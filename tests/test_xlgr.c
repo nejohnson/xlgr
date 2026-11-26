@@ -200,6 +200,71 @@ static void test_ansi_styles(void)
     CHECK_INT(line_at(0)->nruns, 0);
 }
 
+static void test_escape_strings(void)
+{
+    reset(100);
+    feed("a\x1b]0;window title\x07" "b\n");              /* OSC ended by BEL */
+    CHECK_STR(text(0), "ab");
+    feed("a\x1b]8;;http://example.com\x1b\\link\x1b]8;;\x1b\\z\n");   /* OSC 8, ended by ST */
+    CHECK_STR(text(1), "alinkz");
+    feed("x\x1bP1$r0m\x1b\\y\x1b_app data\x1b\\z\n");       /* DCS and APC */
+    CHECK_STR(text(2), "xyz");
+    feed("t\x1b]0;caf\xc3\xa9 \xe2\x80\xa2\x07" "u\n");      /* UTF-8 inside a string */
+    CHECK_STR(text(3), "tu");
+    feed("m\x1b]2;sp");                                    /* split across reads */
+    feed("lit\x07n\n");
+    CHECK_STR(text(4), "mn");
+    feed("x\x1b]0;unterminated\nnext\n");                 /* a newline ends the string */
+    CHECK_STR(text(5), "x");
+    CHECK_STR(text(6), "next");
+    feed("a\x1b]0;t\x1b[31mred\n");                       /* ESC [ inside a string starts a CSI */
+    CHECK_STR(text(7), "ared");
+    CHECK_INT(line_at(7)->runs[0].col, 1);
+    CHECK_INT(line_at(7)->runs[0].style.fg, ANSI_INDEXED | 1);
+    feed("p\x1b]0;a\x1b\x1b\\q\n");                      /* ESC ESC \ */
+    CHECK_STR(text(8), "pq");
+
+    reset(100);
+    feed("a\x1b(Bb\x1b(0c\x1b)0d\x1b#8e\n");             /* charset and ESC # sequences */
+    CHECK_STR(text(0), "abcde");
+
+    reset(100);
+    feed("a\x07" "b\x07\n");                              /* BEL is dropped */
+    CHECK_STR(text(0), "ab");
+    feed("c\x1b" "7d\x1b" "8e\n");                       /* save/restore cursor */
+    CHECK_STR(text(1), "cde");
+    feed("x\x1b\ny\n");                                   /* a lone ESC must not eat the newline */
+    CHECK_STR(text(2), "x");
+    CHECK_STR(text(3), "y");
+    feed("p\x1b[31\nq\x1b(\nr\n");                       /* nor an unfinished CSI or charset */
+    CHECK_STR(text(4), "p");
+    CHECK_STR(text(5), "q");
+    CHECK_STR(text(6), "r");
+    feed("a\x1b[3\x1b[32mb\n");                          /* ESC inside a CSI restarts it */
+    CHECK_STR(text(7), "ab");
+    CHECK_INT(line_at(7)->runs[0].style.fg, ANSI_INDEXED | 2);
+}
+
+static void test_ansi_dim_strike(void)
+{
+    reset(100);
+    feed("\x1b[2mdim\x1b[22m \x1b[9mstrike\x1b[29m \x1b[1;2mboth\x1b[22m.\n");
+    const Line *l = line_at(0);
+    CHECK_STR(l->s, "dim strike both.");
+    CHECK_INT(l->nruns, 6);
+    CHECK_INT(l->runs[0].style.attrs, A_DIM);
+    CHECK_INT(l->runs[1].col, 3);
+    CHECK_INT(l->runs[1].style.attrs, 0);
+    CHECK_INT(l->runs[2].style.attrs, A_STRIKE);
+    CHECK_INT(l->runs[3].style.attrs, 0);
+    CHECK_INT(l->runs[4].style.attrs, A_BOLD | A_DIM);
+    CHECK_INT(l->runs[5].style.attrs, 0);           /* 22 clears bold and dim */
+
+    reset(100);
+    feed("\x1b[2;9;4mx\x1b[0m\n");
+    CHECK_INT(line_at(0)->runs[0].style.attrs, A_DIM | A_STRIKE | A_UNDERLINE);
+}
+
 static void test_ansi_colours(void)
 {
     dark_background = false;
@@ -435,6 +500,10 @@ static void test_rules(void)
     CHECK_INT(r.group, 1);
     regfree(&r.re);
 
+    CHECK_INT(parse_rule("/x/ strike", &r, err, sizeof err), 0);
+    CHECK_INT(r.attrs, A_STRIKE);
+    regfree(&r.re);
+
     CHECK_INT(parse_rule("/x/ \t bold   # c", &r, err, sizeof err), 0);
     CHECK_INT(r.attrs, A_BOLD);
     regfree(&r.re);
@@ -516,6 +585,8 @@ int main(void)
     test_long_lines();
     test_ansi_stripping();
     test_ansi_styles();
+    test_escape_strings();
+    test_ansi_dim_strike();
     test_ansi_colours();
     test_ring();
     test_filter();

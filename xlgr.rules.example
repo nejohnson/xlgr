@@ -4,7 +4,7 @@
 #
 # The regex is POSIX extended (use [0-9] or [[:digit:]], not \d). Attributes:
 #   fg=COLOR bg=COLOR   X colour name or #rrggbb
-#   bold underline      text styles
+#   bold underline strike   text styles
 #   dim                 fade the text colour towards the background
 #   group=N             colour only parenthesised group N (default: whole match)
 #   line                colour the whole line when the regex matches anywhere

@@ -188,7 +188,7 @@ static long long monotonic_ms(void)
 /* ANSI SGR style. Colours are -1 (default), 0xRRGGBB, or ANSI_INDEXED | n
    for the 256-colour palette. */
 #define ANSI_INDEXED 0x1000000
-enum { A_BOLD = 1, A_UNDERLINE = 2, A_REVERSE = 4 };
+enum { A_BOLD = 1, A_UNDERLINE = 2, A_REVERSE = 4, A_DIM = 8, A_STRIKE = 16 };
 
 typedef struct {
     int32_t fg, bg;
@@ -211,7 +211,8 @@ static const AnsiStyle ansi_default = { -1, -1, 0 };
 
 static struct {
     bool skip_lf;
-    int esc;             /* 0 none, 1 after ESC, 2 inside CSI */
+    int esc;             /* 0 none, 1 after ESC, 2 inside CSI, 3 inside an OSC/DCS/APC/PM/SOS
+                            string, 4 ESC seen in a string, 5 charset byte to skip */
     int utf_need;
     unsigned utf_cp;
     char csi[64];        /* CSI parameter bytes */
@@ -423,11 +424,14 @@ static void apply_sgr(const char *params)
         int c = v[i];
         if (c == 0) *st = ansi_default;
         else if (c == 1) st->attrs |= A_BOLD;
+        else if (c == 2) st->attrs |= A_DIM;
         else if (c == 4) st->attrs |= A_UNDERLINE;
         else if (c == 7) st->attrs |= A_REVERSE;
-        else if (c == 22) st->attrs &= (uint8_t)~A_BOLD;
+        else if (c == 9) st->attrs |= A_STRIKE;
+        else if (c == 22) st->attrs &= (uint8_t)~(A_BOLD | A_DIM);
         else if (c == 24) st->attrs &= (uint8_t)~A_UNDERLINE;
         else if (c == 27) st->attrs &= (uint8_t)~A_REVERSE;
+        else if (c == 29) st->attrs &= (uint8_t)~A_STRIKE;
         else if (c >= 30 && c <= 37) st->fg = ANSI_INDEXED | (c - 30);
         else if (c >= 40 && c <= 47) st->bg = ANSI_INDEXED | (c - 40);
         else if (c >= 90 && c <= 97) st->fg = ANSI_INDEXED | (c - 90 + 8);
@@ -460,7 +464,7 @@ static void put_char(unsigned char c)
         uint32_t col = open_line ? line_at(total - 1)->len : 0;
         do append_char(' '); while (++col % 8);
     } else if (c < 0x20 || c == 0x7f) {
-        if (c) append_char('.');
+        if (c && c != 0x07) append_char('.');   /* NUL and BEL are dropped */
     } else {
         append_char(c);
     }
@@ -472,10 +476,32 @@ static void ingest_byte(unsigned char c)
         ing.skip_lf = false;
         if (c == '\n') return;
     }
+    if (ing.esc == 4) {                      /* ESC inside a string */
+        if (c == '\\') { ing.esc = 0; return; }   /* ST ends it */
+        ing.esc = 1;                         /* otherwise a new sequence starts */
+    }
+    /* A control character aborts an unfinished escape sequence and is
+       handled normally, so a stray ESC cannot swallow a newline. */
+    if ((ing.esc == 1 || ing.esc == 2 || ing.esc == 5) && c < 0x20 && c != 0x1b)
+        ing.esc = 0;
+    if (ing.esc == 2 && c == 0x1b) { ing.esc = 1; return; }
     if (ing.esc == 1) {
-        ing.esc = (c == '[') ? 2 : 0;
-        ing.csilen = 0;
+        if (c == '[') { ing.esc = 2; ing.csilen = 0; }
+        else if (c == ']' || c == 'P' || c == '_' || c == '^' || c == 'X') ing.esc = 3;
+        else if (strchr("()*+-./#%", c)) ing.esc = 5;
+        else if (c == 0x1b) ing.esc = 1;
+        else ing.esc = 0;
         return;
+    }
+    if (ing.esc == 5) {                      /* ESC ( B and friends take one more byte */
+        ing.esc = 0;
+        return;
+    }
+    if (ing.esc == 3) {                      /* OSC, DCS, APC, PM, SOS strings */
+        if (c == 0x07) { ing.esc = 0; return; }
+        if (c == 0x1b) { ing.esc = 4; return; }
+        if (c != '\n' && c != '\r') return;
+        ing.esc = 0;                         /* an unterminated string ends at the line */
     }
     if (ing.esc == 2) {
         if (c >= 0x40 && c <= 0x7e) {
@@ -589,6 +615,24 @@ static uint32_t ansi_rgb(int n)
     return (uint32_t)(g << 16 | g << 8 | g);
 }
 
+/* Palette index for fg faded halfway towards bg, cached so repeated redraws
+   do not allocate new colours. */
+static int pal_dim(int f, int b)
+{
+    static struct { int f, b, dim; } cache[256];
+    static int used;
+    for (int i = 0; i < used; ++i)
+        if (cache[i].f == f && cache[i].b == b) return cache[i].dim;
+    int dim = pal_blend(f, b);
+    if (used < 256) {
+        cache[used].f = f;
+        cache[used].b = b;
+        cache[used].dim = dim;
+        ++used;
+    }
+    return dim;
+}
+
 /* Palette index for an ANSI colour value, or 0 for the default/unavailable. */
 static int ansi_pal(int32_t color)
 {
@@ -680,6 +724,7 @@ static int parse_rule(const char *text, Rule *r, char *err, size_t errlen)
         else if (!strncmp(word, "group=", 6)) r->group = atoi(word + 6);
         else if (!strcmp(word, "bold")) r->attrs |= A_BOLD;
         else if (!strcmp(word, "underline")) r->attrs |= A_UNDERLINE;
+        else if (!strcmp(word, "strike")) r->attrs |= A_STRIKE;
         else if (!strcmp(word, "dim")) dim = true;
         else if (!strcmp(word, "line")) r->line = true;
         else {
@@ -1438,10 +1483,11 @@ static void draw_row(const Line *l, int y, bool cursor, bool selected)
             f = nf;
             b = nb;
         }
+        if (run->style.attrs & A_DIM) f = pal_dim(f ? f : ifg, b ? b : ibg);
         for (int i = from; i < to && i < len; ++i) {
             if (!fgi[i]) fgi[i] = (uint16_t)f;
             if (!bgi[i]) bgi[i] = (uint16_t)b;
-            at[i] |= run->style.attrs & (A_BOLD | A_UNDERLINE);
+            at[i] |= run->style.attrs & (A_BOLD | A_UNDERLINE | A_STRIKE);
         }
     }
     if (search_on) {
@@ -1474,6 +1520,10 @@ static void draw_row(const Line *l, int y, bool cursor, bool selected)
         XSetForeground(dpy, gc, pal[f].c.pixel);
         XDrawString(dpy, backbuf, gc, x, y + font->ascent, l->s + i, j - i);
         if (a & A_BOLD) XDrawString(dpy, backbuf, gc, x + 1, y + font->ascent, l->s + i, j - i);
+        if (a & A_STRIKE) {
+            int sy = y + font->ascent - font->ascent / 3;
+            XDrawLine(dpy, backbuf, gc, x, sy, x + (j - i) * cw - 1, sy);
+        }
         if (a & A_UNDERLINE) XDrawLine(dpy, backbuf, gc, x, y + font->ascent + 1, x + (j - i) * cw - 1, y + font->ascent + 1);
         i = j;
     }
