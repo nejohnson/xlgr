@@ -6,6 +6,11 @@ telnet connection, with regex highlighting rules, a scrollbar and a cursor.
 Lines are kept in memory (100,000 by default; up to 100,000,000 with
 `-scrollback`) and the oldest are dropped when the limit is reached.
 
+![xlgr showing a highlighted log with a search active](docs/screenshot.png)
+
+*A sample log using `xlgr.rules.example`-style rules, with ANSI colours, a
+search for `timeout` and the cursor line selected.*
+
 Build it with `make` (a C compiler and Xlib development files are required),
 then run:
 
