@@ -26,7 +26,8 @@ some_command | ./xlgr -                # standard input
 Options: `-serial`, `-baud`, `-serialmode`, `-flow`, `-telnet`, `-file`,
 `-scrollback`, `-rules`, `-rule`, `-norules`, `-noansi`, `-font`, `-display`,
 `-geometry` (in pixels), `-fg`/`-foreground`, `-bg`/`-background` and
-`-hl`/`-highlight` (cursor line colour). Run `./xlgr -help` for a summary.
+`-hl`/`-highlight` (cursor line colour) and `-sel`/`-selection` (selected
+lines, default `#c6dcff`). Run `./xlgr -help` for a summary.
 
 ## Keys and mouse
 
@@ -37,15 +38,24 @@ Options: `-serial`, `-baud`, `-serialmode`, `-flow`, `-telnet`, `-file`,
 | mouse wheel | scroll 3 lines (1 with Shift); scrolling to the bottom resumes following |
 | scrollbar | drag the thumb, or click the trough to page |
 | click a line | put the cursor on it |
+| drag | select whole lines from the line where you pressed to the line under the pointer (any part of a line selects all of it); dragging past the top or bottom scrolls |
+| Shift+click | extend the selection to the clicked line |
+| Esc | clear the selection (then the search, then the cursor) |
 | Home/`g`, End/`G` | top of the buffer; newest line and follow |
 | space | pause or resume following |
 | Left/Right | scroll sideways 8 columns |
 | `/` text, Enter | regex search (Esc clears); `n`/`N` next/previous |
 | `f` text, Enter | show only lines matching a regex; an empty filter clears it |
-| Enter or `c` | copy the cursor line (or the newest) to PRIMARY and CLIPBOARD |
+| Enter or `c` | copy the selection (or the cursor line, or the newest) to PRIMARY and CLIPBOARD |
 | `w` | write the visible lines to a file (prompts for the name) |
 | `C` | clear the buffer |
 | `q` | quit |
+
+Selections are always whole lines and are made of the text only, without
+colours. Releasing the mouse after a drag makes the selection available to
+middle-click paste (PRIMARY); Enter or `c` also puts it on CLIPBOARD for
+Ctrl+V. With a filter active, only the visible lines are selected, and
+changing the filter clears the selection.
 
 Search and filter patterns are POSIX extended regexes and ignore case unless
 the pattern contains an upper-case letter. The status line shows the source,

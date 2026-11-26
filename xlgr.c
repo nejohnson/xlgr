@@ -39,6 +39,7 @@ typedef struct {
     const char *foreground;
     const char *background;
     const char *highlight;
+    const char *selection;
     const char *font;
     const char *file;        /* "-" is standard input */
     const char *serial;
@@ -64,11 +65,12 @@ static void usage(FILE *out)
         "            [-scrollback lines] [-rules file] [-rule 'regex rule'] [-norules]\n"
         "            [-noansi]\n"
         "            [-font font] [-display display] [-geometry geometry]\n"
-        "            [-fg color] [-bg color] [-hl color]\n"
+        "            [-fg color] [-bg color] [-hl color] [-sel color]\n"
         "View log messages from a file (followed as it grows), standard input, a\n"
         "serial port or a telnet connection, with regex highlighting rules.\n"
         "Keys: arrows/PgUp/PgDn/Home/End scroll, space pauses, / searches (n/N),\n"
-        "f filters, Enter copies the cursor line, w writes, C clears, q quits.\n");
+        "f filters, drag selects whole lines, Enter copies the selection or cursor\n"
+        "line, w writes, C clears, q quits.\n");
 }
 
 static const char *option_value(int argc, char **argv, int *i)
@@ -97,7 +99,7 @@ static long number_value(int argc, char **argv, int *i, long lo, long hi)
 static void parse_options(int argc, char **argv)
 {
     opt = (Options){ .foreground = "black", .background = "white",
-                     .highlight = "gray85", .font = "fixed",
+                     .highlight = "gray85", .selection = "#c6dcff", .font = "fixed",
                      .scrollback = 100000, .baud = 115200,
                      .serialmode = "8N1" };
     for (int i = 1; i < argc; ++i) {
@@ -144,6 +146,8 @@ static void parse_options(int argc, char **argv)
             opt.background = option_value(argc, argv, &i);
         } else if (!strcmp(arg, "-hl") || !strcmp(arg, "-highlight")) {
             opt.highlight = option_value(argc, argv, &i);
+        } else if (!strcmp(arg, "-sel") || !strcmp(arg, "-selection")) {
+            opt.selection = option_value(argc, argv, &i);
         } else if (arg[0] != '-' || !strcmp(arg, "-")) {
             if (opt.file) {
                 fprintf(stderr, "xlgr: only one file may be given\n");
@@ -221,6 +225,10 @@ static int64_t base;     /* absolute number of the oldest line held */
 static int64_t total;    /* absolute number of the next line */
 static bool open_line;   /* the newest line is still being received */
 static bool dirty;       /* the window needs redrawing */
+
+/* Line selection: absolute numbers of the anchor and the other end. */
+static bool sel_on;
+static int64_t sel_a, sel_b;
 
 /* Optional filter: absolute numbers of matching closed lines. */
 static bool filter_on;
@@ -342,6 +350,7 @@ static void clear_buffer(void)
     base = total;
     open_line = false;
     fcount = fstart = 0;
+    sel_on = false;
     dirty = true;
 }
 
@@ -519,7 +528,7 @@ typedef struct { char *name; XColor c; } PalEntry;
 static PalEntry pal[PAL_MAX];
 static int npal = 1;             /* entry 0 means "unset" */
 static int ifg, ibg, ihl;        /* default palette indices */
-static int isb_trough, isb_thumb, isearch_fg, isearch_bg;
+static int isb_trough, isb_thumb, isearch_fg, isearch_bg, isel;
 
 static int pal_get(const char *name)
 {
@@ -1228,6 +1237,7 @@ static void apply_search(const char *text)
 static void apply_filter(const char *text)
 {
     int64_t anchor = cursor_on ? cur_abs : top_abs;
+    sel_on = false;
     if (filter_on) { regfree(&filter_re); filter_on = false; }
     filter_text[0] = 0;
     if (*text) {
@@ -1250,20 +1260,81 @@ static void apply_filter(const char *text)
 /* Clipboard                                                          */
 /* ------------------------------------------------------------------ */
 
-static char *clip_text;
+/* Selection text for PRIMARY and for CLIPBOARD. */
+static char *primary_text, *clip_text;
+static bool own_primary, own_clip;
 static Atom a_clipboard, a_utf8, a_targets;
 
-static void copy_line(void)
+/* Visible-line range [lo, hi] covered by the selection. */
+static bool sel_range(int64_t *lo, int64_t *hi)
 {
     int64_t n = nvis();
-    if (n == 0) return;
-    int64_t a = cursor_on ? vabs(vlower(cur_abs) < n ? vlower(cur_abs) : n - 1) : vabs(n - 1);
-    free(clip_text);
-    clip_text = strdup(line_at(a)->s);
-    if (!clip_text) die_oom();
+    if (!sel_on || n == 0) return false;
+    int64_t a = vlower(sel_a), b = vlower(sel_b);
+    if (a >= n) a = n - 1;
+    if (b >= n) b = n - 1;
+    *lo = a < b ? a : b;
+    *hi = a < b ? b : a;
+    return true;
+}
+
+/* The selected lines joined by newlines (malloc'd), or NULL. */
+static char *selection_text(int64_t *nlines)
+{
+    int64_t lo, hi;
+    if (!sel_range(&lo, &hi)) return NULL;
+    size_t len = 1;
+    for (int64_t k = lo; k <= hi; ++k) len += line_at(vabs(k))->len + 1;
+    char *text = malloc(len), *p = text;
+    if (!text) die_oom();
+    for (int64_t k = lo; k <= hi; ++k) {
+        const Line *l = line_at(vabs(k));
+        memcpy(p, l->s, l->len);
+        p += l->len;
+        if (k < hi) *p++ = '\n';
+    }
+    *p = 0;
+    if (nlines) *nlines = hi - lo + 1;
+    return text;
+}
+
+static void publish(char *text, bool clipboard)
+{
+    free(primary_text);
+    primary_text = text;
     XSetSelectionOwner(dpy, XA_PRIMARY, win, CurrentTime);
-    XSetSelectionOwner(dpy, a_clipboard, win, CurrentTime);
-    set_msg("copied line %lld", (long long)(a + 1));
+    own_primary = true;
+    if (clipboard) {
+        free(clip_text);
+        clip_text = strdup(text);
+        if (!clip_text) die_oom();
+        XSetSelectionOwner(dpy, a_clipboard, win, CurrentTime);
+        own_clip = true;
+    }
+}
+
+/* Make the mouse selection available for middle-click paste. */
+static void publish_selection(void)
+{
+    int64_t n;
+    char *text = selection_text(&n);
+    if (text) publish(text, false);
+}
+
+/* Copy the selection, or else the cursor line (the newest if no cursor),
+   to both PRIMARY and CLIPBOARD. */
+static void copy_selection(void)
+{
+    int64_t n = nvis(), count = 1;
+    if (n == 0) return;
+    char *text = selection_text(&count);
+    if (!text) {
+        int64_t a = cursor_on ? vabs(vlower(cur_abs) < n ? vlower(cur_abs) : n - 1) : vabs(n - 1);
+        text = strdup(line_at(a)->s);
+        if (!text) die_oom();
+    }
+    publish(text, true);
+    set_msg("copied %lld line%s", (long long)count, count == 1 ? "" : "s");
 }
 
 static void answer_selection(const XSelectionRequestEvent *e)
@@ -1271,22 +1342,24 @@ static void answer_selection(const XSelectionRequestEvent *e)
     XSelectionEvent r = { .type = SelectionNotify, .display = e->display,
                           .requestor = e->requestor, .selection = e->selection,
                           .target = e->target, .property = None, .time = e->time };
+    const char *text = e->selection == XA_PRIMARY ? primary_text :
+                       e->selection == a_clipboard ? clip_text : NULL;
     Atom prop = e->property ? e->property : e->target;
-    if (clip_text && e->target == a_targets) {
+    if (text && e->target == a_targets) {
         Atom targets[] = { a_targets, XA_STRING, a_utf8 };
         XChangeProperty(dpy, e->requestor, prop, XA_ATOM, 32, PropModeReplace,
                         (unsigned char *)targets, 3);
         r.property = prop;
-    } else if (clip_text && e->target == XA_STRING) {
+    } else if (text && e->target == XA_STRING) {
         XChangeProperty(dpy, e->requestor, prop, XA_STRING, 8, PropModeReplace,
-                        (unsigned char *)clip_text, (int)strlen(clip_text));
+                        (const unsigned char *)text, (int)strlen(text));
         r.property = prop;
-    } else if (clip_text && e->target == a_utf8) {
-        size_t len = strlen(clip_text);
+    } else if (text && e->target == a_utf8) {
+        size_t len = strlen(text);
         unsigned char *u = malloc(len * 2 + 1), *q = u;
         if (u) {
             for (size_t i = 0; i < len; ++i) {
-                unsigned char c = (unsigned char)clip_text[i];
+                unsigned char c = (unsigned char)text[i];
                 if (c < 0x80) *q++ = c;
                 else { *q++ = 0xC0 | (c >> 6); *q++ = 0x80 | (c & 0x3f); }
             }
@@ -1318,7 +1391,7 @@ static void fill(int ci, int x, int y, int w, int h)
     XFillRectangle(dpy, backbuf, gc, x, y, (unsigned)w, (unsigned)h);
 }
 
-static void draw_row(const Line *l, int y, bool cursor)
+static void draw_row(const Line *l, int y, bool cursor, bool selected)
 {
     static uint16_t fgi[MAXLINE], bgi[MAXLINE];
     static uint8_t at[MAXLINE];
@@ -1384,7 +1457,7 @@ static void draw_row(const Line *l, int y, bool cursor)
     }
 
     int text_w = (int)win_w - SCROLLBAR;
-    int base_bg = cursor ? ihl : row_bg ? row_bg : ibg;
+    int base_bg = selected ? isel : cursor ? ihl : row_bg ? row_bg : ibg;
     fill(base_bg, 0, y, text_w, lh);
     int cols = text_w / cw + 1;
     int end = len < xoff + cols ? len : xoff + cols;
@@ -1426,6 +1499,9 @@ static void draw_status(void)
         int k = snprintf(rest, sizeof rest, "%s%s \xb7 %s", *st ? " " : "", st, counts);
         if (search_on) k += snprintf(rest + k, sizeof rest - (size_t)k, " \xb7 /%s", search_text);
         if (filter_on) k += snprintf(rest + k, sizeof rest - (size_t)k, " \xb7 filter %s", filter_text);
+        int64_t slo, shi;
+        if (sel_range(&slo, &shi))
+            k += snprintf(rest + k, sizeof rest - (size_t)k, " \xb7 %lld selected", (long long)(shi - slo + 1));
         if (msg[0]) snprintf(rest + k, sizeof rest - (size_t)k, " \xb7 %s", msg);
         /* Trim the source name from the left so the state stays visible. */
         int room = ((int)win_w - (int)strlen("FOLLOW") * cw - 12) / cw - (int)strlen(rest);
@@ -1466,9 +1542,12 @@ static void draw(void)
     fill(ibg, 0, 0, (int)win_w, (int)win_h);
     int64_t n = nvis(), vt = sync_view(), rows = text_rows();
     int64_t cur_v = cursor_on ? vlower(cur_abs) : -1;
+    int64_t sel_lo = -1, sel_hi = -1;
+    sel_range(&sel_lo, &sel_hi);
+    if (!sel_on) sel_lo = sel_hi = -1;
     for (int64_t k = 0; k < rows && vt + k < n; ++k) {
         const Line *l = line_at(vabs(vt + k));
-        draw_row(l, (int)k * lh, vt + k == cur_v);
+        draw_row(l, (int)k * lh, vt + k == cur_v, vt + k >= sel_lo && vt + k <= sel_hi);
     }
     fill(isb_trough, text_w, 0, SCROLLBAR, text_h);
     int ty, th;
@@ -1648,15 +1727,33 @@ static bool handle_key(XKeyEvent *ev)
     case XK_n: search_next(1); break;
     case XK_N: search_next(-1); break;
     case XK_C: clear_buffer(); break;
-    case XK_Return: case XK_KP_Enter: case XK_c: copy_line(); break;
+    case XK_Return: case XK_KP_Enter: case XK_c: copy_selection(); break;
     case XK_Escape:
-        if (search_on) apply_search("");
+        if (sel_on) sel_on = false;
+        else if (search_on) apply_search("");
         else cursor_on = false;
         break;
     case XK_q: return false;
     default: break;
     }
     return true;
+}
+
+/* Mouse selection of whole lines. */
+static bool sel_pending;         /* button 1 is down in the text area */
+static bool selecting;           /* dragged far enough to be a selection */
+static int press_x, press_y, drag_y;
+static long long next_autoscroll;
+
+/* Absolute line under pixel row y, clamped to the lines on screen. */
+static int64_t line_under(int y)
+{
+    int64_t n = nvis(), vt = sync_view(), rows = text_rows();
+    int64_t k = y < 0 ? 0 : y / lh;
+    if (k >= rows) k = rows - 1;
+    k += vt;
+    if (k >= n) k = n - 1;
+    return vabs(k);
 }
 
 static void handle_button(XButtonEvent *ev)
@@ -1679,15 +1776,47 @@ static void handle_button(XButtonEvent *ev)
             int64_t page = text_rows() > 1 ? text_rows() - 1 : 1;
             scroll_by(ev->y < ty ? -page : page);
         }
-    } else if (ev->y < text_h) {
+    } else if (ev->y < text_h && nvis() > 0) {
         int64_t vt = sync_view(), n = nvis();
         int64_t k = vt + ev->y / lh;
-        if (k < n) cursor_to(k);
+        if (k >= n) return;
+        if (ev->state & ShiftMask) {
+            /* Extend from the existing selection, the cursor, or this line. */
+            if (!sel_on) { sel_a = cursor_on ? cur_abs : vabs(k); sel_on = true; }
+            sel_b = vabs(k);
+            publish_selection();
+            dirty = true;
+            return;
+        }
+        sel_on = false;
+        cursor_to(k);
+        sel_pending = true;
+        selecting = false;
+        press_x = ev->x;
+        press_y = drag_y = ev->y;
     }
+}
+
+static void extend_selection(int x, int y)
+{
+    drag_y = y;
+    if (!selecting) {
+        if (abs(y - press_y) < 3 && abs(x - press_x) < 3)
+            return;                  /* below the drag threshold: still a click */
+        selecting = true;
+        sel_on = true;
+        sel_a = cur_abs;             /* the line that was clicked */
+    }
+    sel_b = line_under(y);
+    dirty = true;
 }
 
 static void handle_motion(XMotionEvent *ev)
 {
+    if (sel_pending && nvis() > 0) {
+        extend_selection(ev->x, ev->y);
+        return;
+    }
     if (!dragging) return;
     int text_h = (int)win_h - (lh + 4);
     int ty, th;
@@ -1700,6 +1829,33 @@ static void handle_motion(XMotionEvent *ev)
     int64_t target = pos * (n - rows) / (text_h - th);
     int64_t cur = sync_view();
     scroll_to(target, target < cur || target < n - rows);
+}
+
+static void handle_release(XButtonEvent *ev)
+{
+    if (ev->button != Button1) return;
+    dragging = false;
+    if (selecting) publish_selection();
+    sel_pending = false;
+    selecting = false;
+}
+
+/* While dragging above or below the text, keep scrolling and extending. */
+static void autoscroll(long long now)
+{
+    int text_h = (int)win_h - (lh + 4);
+    if (!selecting || (drag_y >= 0 && drag_y < text_h) || now < next_autoscroll) return;
+    int64_t n = nvis(), rows = text_rows();
+    if (drag_y < 0) {
+        scroll_by(-1);
+        sel_b = vabs(sync_view());
+    } else {
+        scroll_by(1);
+        int64_t last = sync_view() + rows - 1;
+        sel_b = vabs(last < n ? last : n - 1);
+    }
+    next_autoscroll = now + 40;
+    dirty = true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1742,6 +1898,7 @@ int main(int argc, char **argv)
     ibg = pal_required(opt.background);
     ihl = pal_required(opt.highlight);
     dark_background = (pal[ibg].c.red + pal[ibg].c.green + pal[ibg].c.blue) / 3 < 0x8000;
+    isel = pal_required(opt.selection);
     isb_trough = pal_required("gray90");
     isb_thumb = pal_required("gray55");
     isearch_fg = pal_required("black");
@@ -1814,10 +1971,13 @@ int main(int argc, char **argv)
             case Expose: if (ev.xexpose.count == 0) dirty = true; break;
             case KeyPress: if (!handle_key(&ev.xkey)) running = false; break;
             case ButtonPress: handle_button(&ev.xbutton); break;
-            case ButtonRelease: if (ev.xbutton.button == Button1) dragging = false; break;
+            case ButtonRelease: handle_release(&ev.xbutton); break;
             case MotionNotify: handle_motion(&ev.xmotion); break;
             case SelectionRequest: answer_selection(&ev.xselectionrequest); break;
-            case SelectionClear: free(clip_text); clip_text = NULL; break;
+            case SelectionClear:
+                if (ev.xselectionclear.selection == XA_PRIMARY) { free(primary_text); primary_text = NULL; }
+                else if (ev.xselectionclear.selection == a_clipboard) { free(clip_text); clip_text = NULL; }
+                break;
             default: break;
             }
         }
@@ -1825,6 +1985,9 @@ int main(int argc, char **argv)
 
         now = monotonic_ms();
         long long deadline = now + 1000;
+        autoscroll(now);
+        if (selecting && (drag_y < 0 || drag_y >= (int)win_h - (lh + 4)) && next_autoscroll < deadline)
+            deadline = next_autoscroll;
         if (dirty) {
             long long due = last_draw + FRAME_MS;
             if (due <= now) {

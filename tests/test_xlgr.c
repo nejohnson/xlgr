@@ -32,6 +32,7 @@ static void reset(size_t cap)
     follow = true;
     top_abs = cur_abs = 0;
     cursor_on = false;
+    sel_on = false;
     msg[0] = 0;
     lh = 10;
     cw = 6;
@@ -341,6 +342,73 @@ static void test_search(void)
     CHECK_INT(cur_abs, 15);
 }
 
+static void test_selection(void)
+{
+    int64_t count = 0, lo, hi;
+    reset(100);
+    feed_lines("l", 10);
+    CHECK(selection_text(&count) == NULL);          /* nothing selected */
+    CHECK(!sel_range(&lo, &hi));
+
+    sel_on = true;
+    sel_a = 2;
+    sel_b = 4;
+    char *t = selection_text(&count);
+    CHECK_STR(t, "l2\nl3\nl4");                      /* whole lines, no trailing newline */
+    CHECK_INT(count, 3);
+    free(t);
+
+    sel_a = 4;                                      /* either direction */
+    sel_b = 2;
+    t = selection_text(&count);
+    CHECK_STR(t, "l2\nl3\nl4");
+    free(t);
+
+    sel_a = sel_b = 7;                              /* a single line */
+    t = selection_text(&count);
+    CHECK_STR(t, "l7");
+    CHECK_INT(count, 1);
+    free(t);
+
+    sel_a = 8;                                      /* past the end is clamped */
+    sel_b = 500;
+    CHECK(sel_range(&lo, &hi));
+    CHECK_INT(lo, 8);
+    CHECK_INT(hi, 9);
+
+    clear_buffer();                                 /* clearing drops the selection */
+    CHECK(!sel_on);
+
+    reset(5);                                       /* a trimmed anchor clamps to the oldest */
+    feed_lines("l", 12);                            /* l7..l11 remain */
+    sel_on = true;
+    sel_a = 2;
+    sel_b = 9;
+    t = selection_text(&count);
+    CHECK_STR(t, "l7\nl8\nl9");
+    free(t);
+
+    reset(100);                                     /* selections span only filtered lines */
+    feed("a1\nb\na2\nb\na3\nb\n");
+    apply_filter("a");
+    CHECK(!sel_on);                                 /* a new filter drops the selection */
+    sel_on = true;
+    sel_a = 0;
+    sel_b = 4;
+    t = selection_text(&count);
+    CHECK_STR(t, "a1\na2\na3");
+    CHECK_INT(count, 3);
+    free(t);
+
+    reset(100);                                     /* a line with ANSI colour copies as plain text */
+    feed("\x1b[31mred\x1b[0m text\n");
+    sel_on = true;
+    sel_a = sel_b = 0;
+    t = selection_text(&count);
+    CHECK_STR(t, "red text");
+    free(t);
+}
+
 static void test_rules(void)
 {
     Rule r;
@@ -453,6 +521,7 @@ int main(void)
     test_filter();
     test_view();
     test_search();
+    test_selection();
     test_rules();
     test_telnet();
     test_serial_baud();
