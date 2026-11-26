@@ -1,0 +1,21 @@
+# Build output
+/xlgr
+*.o
+*.tmp
+xlgr.desktop.tmp
+
+# Debug and test artefacts
+*.dSYM/
+core
+core.*
+vgcore.*
+*.log
+*.xwd
+
+# Editors and OS
+*.swp
+*~
+.vscode/
+.idea/
+.DS_Store
+.claude/

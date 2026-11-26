@@ -1,0 +1,18 @@
+# xlgr highlighting rules: one per line, first match wins for each property.
+#
+#   /regex/[i]  attribute...
+#
+# The regex is POSIX extended (use [0-9] or [[:digit:]], not \d). Attributes:
+#   fg=COLOR bg=COLOR   X colour name or #rrggbb
+#   bold underline      text styles
+#   dim                 fade the text colour towards the background
+#   group=N             colour only parenthesised group N (default: whole match)
+#   line                colour the whole line when the regex matches anywhere
+# A "#" token starts a comment.
+
+/^[0-9:.]+ /          fg=gray50                 # leading timestamp
+/(ERROR|FATAL|PANIC)/i  fg=white bg=red bold line
+/WARN(ING)?/          fg=#b06000 bold
+/\<0x[0-9a-f]+\>/i    fg=blue                   # hex numbers
+/heartbeat|keepalive/ dim line                  # quiet noise
+/\[([a-z_]+)\]/       group=1 fg=#006060        # [module] tag

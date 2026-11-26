@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=xlgr
+Comment=Log message viewer for files, serial ports and telnet
+Exec=xlgr
+Icon=xlgr
+Terminal=false
+Categories=Development;Utility;
+StartupWMClass=Xlgr
